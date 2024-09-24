@@ -1,10 +1,25 @@
 
+Process execution: 
+    1->parse_redis_protocol(char *command);
+         ## This function takes the entire command as a Redis protocol: Example: *2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n
+         |:: Will get the number of elements in the request                                   ^
+         |:: Will get the type of the command(*1)                                              |
+         V                                                                                    |
+        2->parse_command_args(number_of_elements-1, command, &index);                         | 
+            ## This function simple take the command after the point of the type of the command , then will get the rest of the arguments on an array
+            |:: Take the arguments of a command and put them into an array(*2)
+            V
+            3->parse_response(args, command_type)
+                ## This function will take the arguments(2), and the type of the command(*1) and then will implement the actual logic
+
 1.# Add the expier feature to set and get. (DONE)
     1.1: Alter the command parser
     1.2: Alter the arguments and response parser
     1.3: Alter the data structure, when another request of get, 
 
-2.# ADD the TYPE command
+2.# ADD the TYPE command (DONE)
+
+3.# Add the ability for redis streams, and the XADD command
 
 3.# refactor my code, so it supports proper error messages, better handling of commands, 
     slicing up my functions into smaller ones.
