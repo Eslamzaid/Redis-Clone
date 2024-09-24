@@ -17,7 +17,25 @@
 #define MAX_COMMAND_LENGTH 4
 #define MAX_CLIENTS 32
 #define MAX_HASH_TABLE_LENGTH 4096
+#define MAX_STREAM_KEYS 2048
 
+
+typedef char** listpack;
+typedef struct __radix_node radix_node;
+typedef struct __linked_str_list {
+    radix_node* data_pointer; // Pointer to the radix node
+    struct __linked_str_list* next; // Pointer to the next linked list node
+} linked_str_list;
+typedef struct __radix_node {
+    char is_leaf; // Indicates if the node is a leaf
+    char* id_key; // Key for the node
+    listpack value; // Value associated with the key
+    linked_str_list* children; // Pointer to linked list of child nodes
+} radix_node;
+typedef struct {
+    char* stream_key;
+    linked_str_list* stream_data;
+} stream_entry;
 
 typedef struct __linked_list {
 	char expires;
@@ -32,17 +50,28 @@ struct hashTable {
     linked_list *buckets[MAX_HASH_TABLE_LENGTH];
 };
 
+
 struct hashTable myHashTable;
+stream_entry* stream_array[MAX_STREAM_KEYS];
+
 
 char* parse_redis_protocol(char* command);
-	char **parse_command_args(int c_type, char* command, int *index);
+	char **parse_command_args(int n_args, char* command, int * index, int c_type);
 	char *parse_response(char **args, int command_type); 
 
+
+// Hash table with linked-list interface for set and get commands
 void init_Table();
 void insert_new(char* key, char* value, char exp, int m_sec);
 linked_list* lookup_table(char*key);
 char remove_node(char* key);
 unsigned long hash(const char *str);
+
+// Radix tree interface for streams
+void init_stream_table();
+radix_node* create_new_stream_radix_node(char* id_key, linked_str_list* ch_pntr, char is_leaf, listpack k_v_data);
+int lookup_up_stream_one_node(char* stream_entry_key, char* id_key);
+void insert_new_stream(char* stream_key, char* id_key, listpack k_v_data);
 
 
 int main() {
@@ -97,6 +126,7 @@ int main() {
 	}
 	
 	init_Table();
+	init_stream_table();
 	printf("Waiting for a client to connect...\n");
 	
 	client_addr_len = sizeof(client_addr);
@@ -255,6 +285,12 @@ char* parse_redis_protocol(char* command) {
 			return "";
 		}
 		command_type = 5;
+	} else if (strcmp(sliced_string_holder, "xadd") == 0) {
+		if(number_of_elements != 5) {
+			printf("ERROR: XADD should have at least 5 arguments\n");
+			return "";
+		}
+		command_type = 6;
 	} else if(strcmp(sliced_string_holder, "ping") == 0) {
 		char* response = (char*) malloc(7 * sizeof(char));
 		sprintf(response, "+PONG\r\n");
@@ -271,7 +307,7 @@ char* parse_redis_protocol(char* command) {
 	free(sliced_string_holder);
 
 	index++;
-	char **args = parse_command_args(number_of_elements-1, command, &index);
+	char **args = parse_command_args(number_of_elements-1, command, &index, command_type);
 	if(args == NULL) {
 		return "";
 	}
@@ -281,9 +317,8 @@ char* parse_redis_protocol(char* command) {
 
 }
 
-
 // starts from the beginning of the arguments
-char ** parse_command_args(int n_args, char* command, int * index) {
+char ** parse_command_args(int n_args, char* command, int * index, int c_type) {
 
 	int length = 0;
 	char** arguments = malloc(n_args * sizeof(char*));
@@ -309,7 +344,7 @@ char ** parse_command_args(int n_args, char* command, int * index) {
 	}	
 
 	// Added this 
-	if(n_args == 4) {
+	if(n_args == 4 && c_type == 5) {
 		for(int i = 0; i < 2; i++) 
 			arguments[2][i] = tolower(arguments[2][i]);
 		int len = (int) strlen(arguments[3]);
@@ -370,28 +405,38 @@ char *parse_response(char **args, int c_type) {
 		case 3:;
 			linked_list* node = lookup_table(args[0]);
 			response = (char*) malloc(5 * sizeof(char));
-			if(node == NULL) {
-				sprintf(response, "$-1\r\n");
-			} else {
-				sprintf(response, "$%ld\r\n%s\r\n", strlen(node->value), node->value);
-			}
+			if(node == NULL) sprintf(response, "$-1\r\n");
+			else sprintf(response, "$%ld\r\n%s\r\n", strlen(node->value), node->value);
+			
 			free(args[0]);
 			free(args);
 			return response;
 			break;
 		case 5:;
 			linked_list* look_node = lookup_table(args[0]);
-			if(look_node == NULL) {
-				response = malloc(7 * sizeof(char));
-				sprintf(response, "+none\r\n");
-			} else {
+			if(look_node != NULL) {
 				response = malloc(9 * sizeof(char));
 				sprintf(response, "+string\r\n");
+			} else if(lookup_up_stream_one_node(args[0], NULL) == 1) {
+				response = malloc(7 * sizeof(char));
+				sprintf(response, "+stream\r\n");
+			}
+			 else {
+				response = malloc(7 * sizeof(char));
+				sprintf(response, "+none\r\n");
 			}
 			free(args[0]);
 			free(args);
 			return response;
 			break;
+		case 6:;
+			// $ redis-cli XADD stream_key 0-1 foo bar
+			insert_new_stream(args[0], args[1], args);
+
+			int len = strlen(args[1]);
+			response = malloc(len+strlen(args[1])+5);
+			sprintf(response, "$%d\r\n%s\r\n",len, args[1]);
+			return response;
 		default:
 			break;
 	}
@@ -473,7 +518,7 @@ void insert_new(char* key, char* value, char exp, int m_sec) {
 	}
 }
 
-linked_list* lookup_table(char*key) {
+linked_list* lookup_table(char* key) {
     int index = hash(key);
 
     if(myHashTable.buckets[index] == NULL) return NULL;
@@ -525,3 +570,73 @@ unsigned long hash(const char *str) {
 
     return hash % MAX_HASH_TABLE_LENGTH;
 }
+
+
+void init_stream_table() {
+    for(int i = 0; i < MAX_STREAM_KEYS; i++) 
+        stream_array[i] = NULL;
+}
+
+
+radix_node* create_new_stream_radix_node(char* id_key, linked_str_list* ch_pntr, char is_leaf, listpack k_v_data) {
+    radix_node* new_radix = malloc(sizeof(radix_node));
+
+    new_radix->children = ch_pntr;
+    new_radix->is_leaf = is_leaf;
+    new_radix->value = k_v_data;
+    new_radix->id_key = id_key;
+    printf("This is a new node: %s", id_key);
+    return new_radix;
+}
+
+int lookup_up_stream_one_node(char* stream_entry_key, char* id_key) {
+    for(int i = 0; i < MAX_STREAM_KEYS; i++) {
+		if(stream_array[i] == NULL) continue;
+		
+
+        if(strcmp(stream_array[i]->stream_key, stream_entry_key) == 0) {
+			return 1;
+            // linked_str_list* root_ent = stream_array[i]->stream_data;
+            // while(root_ent->data_pointer != NULL) {
+            //     radix_node* node = root_ent->data_pointer;
+            //     // int index = 0;
+            //     while(node != NULL) {
+            //         if(node->is_leaf == 1) {
+            //             printf("The node value is: %s with key: %s\n",node->value[1], node->id_key);
+            //             if(strcmp(node->id_key, id_key) == 0) {
+            //                 return 1;
+            //             }
+            //         }
+            //     }
+            //     root_ent = root_ent->next;
+            // }
+        }
+    }
+	printf("Couldn't findn\n");
+    return 0;
+}
+
+void insert_new_stream(char* stream_key, char* id_key, listpack k_v_data) {
+    // lookup for the stream key if it already exists, do their own logic
+
+    // new stream key
+    for(int i = 0; i < MAX_STREAM_KEYS; i++) {
+        if(stream_array[i] == NULL) {
+            // create the start data
+            radix_node* new_data = create_new_stream_radix_node(id_key, NULL, 1, k_v_data);
+            // link it with the root node
+            linked_str_list* root_node = malloc(sizeof(linked_str_list));
+            root_node->data_pointer = new_data;
+            root_node->next = NULL;
+            // link the root node with the stream entry;
+            stream_entry* new_stream_entry = malloc(sizeof(stream_entry));
+            new_stream_entry->stream_key = stream_key;
+            new_stream_entry->stream_data = root_node;
+            // root_node->data_pointer
+            stream_array[i] = new_stream_entry;
+			printf("Setting entry: %s", stream_array[i]->stream_key);
+			break;
+        }
+    }
+}
+
