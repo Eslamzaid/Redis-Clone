@@ -232,31 +232,33 @@ char* parse_redis_protocol(char* command) {
 
 	if (strcmp(sliced_string_holder, "echo") == 0) {
 		command_type = 1;
-		printf("Number: %d\n", number_of_elements);
 		if(number_of_elements != 2) {
 			printf("ERROR: ECHO accepts only one argument\n");
 			return "";
 		}
-		free(sliced_string_holder);
 	} else if(strcmp(sliced_string_holder, "set") == 0) {
 		if(number_of_elements != 3 && number_of_elements != 5) {
 			printf("ERROR: Not proper SET command\n");
 			return "";
 		}
 		command_type = 2;
-		free(sliced_string_holder);
 		if(number_of_elements == 5) command_type = 4;
-		printf("MOther says: N-ele: %d\n", number_of_elements);
 	} else if(strcmp(sliced_string_holder, "get") == 0) {
 		command_type = 3;
 		if(number_of_elements != 2) {
 			printf("ERROR: GET accepts only one argument\n");
 			return "";
 		}
-		free(sliced_string_holder);
+	} else if(strcmp(sliced_string_holder, "type") == 0) {
+		if(number_of_elements != 2) {
+			printf("ERROR: GET accepts only one argument\n");
+			return "";
+		}
+		command_type = 5;
 	} else if(strcmp(sliced_string_holder, "ping") == 0) {
 		char* response = (char*) malloc(7 * sizeof(char));
 		sprintf(response, "+PONG\r\n");
+		free(sliced_string_holder);
 		return  response;
 	} else {
 		printf("The command: %s, and strlen(%ld\n", sliced_string_holder, strlen(sliced_string_holder));
@@ -266,7 +268,8 @@ char* parse_redis_protocol(char* command) {
 	}
 	
 	// #----- ################### ------------# //
-	
+	free(sliced_string_holder);
+
 	index++;
 	char **args = parse_command_args(number_of_elements-1, command, &index);
 	if(args == NULL) {
@@ -375,6 +378,20 @@ char *parse_response(char **args, int c_type) {
 			free(args[0]);
 			free(args);
 			return response;
+			break;
+		case 5:;
+			linked_list* look_node = lookup_table(args[0]);
+			if(look_node == NULL) {
+				response = malloc(7 * sizeof(char));
+				sprintf(response, "+none\r\n");
+			} else {
+				response = malloc(9 * sizeof(char));
+				sprintf(response, "+string\r\n");
+			}
+			free(args[0]);
+			free(args);
+			return response;
+			break;
 		default:
 			break;
 	}
