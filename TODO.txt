@@ -23,7 +23,7 @@ Process execution:
     1.1: Create an array of keys, each pointing to the start of a "Radix Tree combined with Listpack" Data structure (DONE)
     1.2: Implement the "Radix Tree combined with Listpack" (DONE)
     1.3: Edit the interface + The 'Type' Command (DONE)
-    1.4: Add id checking, and proper functionality
+    1.4: Add id checking, and proper functionality (DONE)
 
 
 3.# refactor my code, so it supports proper error messages, better handling of commands, 
