@@ -1,3 +1,5 @@
+#ifndef SERVER_HEADERS
+#define SERVER_HEADERS
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,48 +13,25 @@
 #include <time.h>
 #include <errno.h>
 #include <pthread.h> 
+#include <math.h>
+#endif
 
+#include "hash.h"
+#include "redis-streams.h"
 
 
 #define MAX_COMMAND_LENGTH 4
 #define MAX_CLIENTS 32
-#define MAX_HASH_TABLE_LENGTH 4096
-#define MAX_STREAM_KEYS 2048
 
 
-typedef char** listpack;
-typedef struct __radix_node radix_node;
-typedef struct __linked_str_list {
-    radix_node* data_pointer; // Pointer to the radix node
-    struct __linked_str_list* next; // Pointer to the next linked list node
-} linked_str_list;
-typedef struct __radix_node {
-    char is_leaf; // Indicates if the node is a leaf
-    char* id_key; // Key for the node
-    listpack value; // Value associated with the key
-    linked_str_list* children; // Pointer to linked list of child nodes
-} radix_node;
-typedef struct {
-    char* stream_key;
-    linked_str_list* stream_data;
-} stream_entry;
+extern stream_entry* stream_array[MAX_STREAM_KEYS];
 
-typedef struct __linked_list {
-	char expires;
-	int milli_second; 
-    char* key;
-    char* value;
-    struct __linked_list *next;
-    struct __linked_list *before;
-} linked_list;
-
-struct hashTable {
-    linked_list *buckets[MAX_HASH_TABLE_LENGTH];
-};
-
-
-struct hashTable myHashTable;
-stream_entry* stream_array[MAX_STREAM_KEYS];
+extern struct hashTable myHashTable;
+// extern char auto_seqence;
+extern char *error_message;
+extern char error_flag;
+extern char name_stripped;
+listpack key_value_data;
 
 
 char* parse_redis_protocol(char* command);
@@ -60,19 +39,8 @@ char* parse_redis_protocol(char* command);
 	char *parse_response(char **args, int command_type); 
 
 
-// Hash table with linked-list interface for set and get commands
-void init_Table();
-void insert_new(char* key, char* value, char exp, int m_sec);
-linked_list* lookup_table(char*key);
-char remove_node(char* key);
-unsigned long hash(const char *str);
 
-// Radix tree interface for streams
-void init_stream_table();
-radix_node* create_new_stream_radix_node(char* id_key, linked_str_list* ch_pntr, char is_leaf, listpack k_v_data);
-int lookup_up_stream_one_node(char* stream_entry_key, char* id_key);
-void insert_new_stream(char* stream_key, char* id_key, listpack k_v_data);
-
+void slice(const char* str, char* result, size_t start, size_t end);
 
 int main() {
 	// Disable output buffering
@@ -158,7 +126,7 @@ int main() {
 					break;
 				}
 			}
-			printf("Client connected\n");
+			printf("Client 	\n");
 		}
 
 		for(int i = 0; i < MAX_CLIENTS; i++) {
@@ -169,7 +137,7 @@ int main() {
 			if(FD_ISSET(sd, &fd_setmask)) {
 				if((valread = read(sd, buffer, sizeof(buffer))) == 0) {
 					getpeername(sd, (struct sockaddr *)&client_addr, (socklen_t *)&client_addr_len);
-                    printf("Client disconnected: ip %s, port %d\n",
+                    printf("Client disconnected: ip %s, port %d\n\n",
                            inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
                     close(sd);
@@ -178,6 +146,11 @@ int main() {
 				else if(valread > 0) {
                     // Process the received data
 					char *response = parse_redis_protocol(buffer);
+					if(error_flag == 1) {
+						error_flag = 0;
+						send(sd, error_message, strlen(error_message), 0);
+						continue;
+					}
 					if(strcmp(response, "") == 0) {
 						send(sd, "$-1\r\n", 5, 0);
 						continue;
@@ -199,7 +172,7 @@ int main() {
 
 char* parse_redis_protocol(char* command) {
     if (command[0] != '*') {
-        printf("**ERROR: Invalid start of command\n");
+        set_error("-ERR: Invalid start of command\r\n");
         return "";
     }
 
@@ -212,7 +185,7 @@ char* parse_redis_protocol(char* command) {
     while (command[index] != '\r' && command[index + 1] != '\n') {
         if (index == 1000) return "";
         if (!isdigit(command[index])) {
-            printf("**ERROR: Expected digit for number of elements\n");
+            set_error("-ERR: Expected digit for number of elements\r\n");
             return "";
         }
         index++;
@@ -224,14 +197,11 @@ char* parse_redis_protocol(char* command) {
 
     number_of_elements = atoi(sliced_string_holder);
     free(sliced_string_holder);
-	// ------ ########################## ------- //
 
     index += 2;
 
-	// #----- Get the command type ------------# //
-	// Parse the length of the next element ($length\r\n)
 	if (command[index] != '$') {
-		printf("**ERROR: Expected '$' for bulk string length\n");
+		set_error("-ERR: Expected '$' for bulk string length\r\n");
 		return "";
 	}
 	index++;
@@ -239,7 +209,7 @@ char* parse_redis_protocol(char* command) {
 	int length = 0;
 	while (command[index] != '\r' && command[index + 1] != '\n') {
 		if (!isdigit(command[index])) {
-			printf("**ERROR: Expected digit for string length\n");
+			set_error("-ERR: Expected digit for string length\r\n");
 			return "";
 		}
 		length = length * 10 + (command[index] - '0');
@@ -255,55 +225,63 @@ char* parse_redis_protocol(char* command) {
 	
 	index += length + 2;  // Skip the string and the following \r\n
 
-	// Check if it's the command or the argument
-	 // First element should be the command
 	for(int g = 0; g < length; g++) 
 		sliced_string_holder[g] = tolower(sliced_string_holder[g]);
 
 	if (strcmp(sliced_string_holder, "echo") == 0) {
 		command_type = 1;
 		if(number_of_elements != 2) {
-			printf("ERROR: ECHO accepts only one argument\n");
+			set_error("-ERR: ECHO accepts only one argument\r\n");
+			free(sliced_string_holder);
 			return "";
 		}
 	} else if(strcmp(sliced_string_holder, "set") == 0) {
 		if(number_of_elements != 3 && number_of_elements != 5) {
-			printf("ERROR: Not proper SET command\n");
+			set_error("-ERR: Not proper SET command\r\n");
+			free(sliced_string_holder);
 			return "";
 		}
 		command_type = 2;
 		if(number_of_elements == 5) command_type = 4;
 	} else if(strcmp(sliced_string_holder, "get") == 0) {
-		command_type = 3;
 		if(number_of_elements != 2) {
-			printf("ERROR: GET accepts only one argument\n");
+			set_error("-ERR: GET accepts only one argument\r\n");
+			free(sliced_string_holder);
 			return "";
 		}
+		command_type = 3;
 	} else if(strcmp(sliced_string_holder, "type") == 0) {
 		if(number_of_elements != 2) {
-			printf("ERROR: GET accepts only one argument\n");
+			set_error("-ERR: GET accepts only one argument\r\n");
+			free(sliced_string_holder);
 			return "";
 		}
 		command_type = 5;
 	} else if (strcmp(sliced_string_holder, "xadd") == 0) {
-		if(number_of_elements != 5) {
-			printf("ERROR: XADD should have at least 5 arguments\n");
+		if(number_of_elements < 5) {
+			set_error("-ERR: XADD should have at least 5 arguments\r\n");
+			free(sliced_string_holder);
 			return "";
 		}
 		command_type = 6;
+	} else if(strcmp(sliced_string_holder, "xrange") == 0) {
+		if(number_of_elements != 2 && number_of_elements != 4) {
+			set_error("-ERR: XRANGE acceepts a stream key, and an optional range values of [MIN MAX]\r\n");
+			free(sliced_string_holder);
+			return "";
+		}
+		command_type = 7;
 	} else if(strcmp(sliced_string_holder, "ping") == 0) {
 		char* response = (char*) malloc(7 * sizeof(char));
 		sprintf(response, "+PONG\r\n");
 		free(sliced_string_holder);
 		return  response;
 	} else {
-		printf("The command: %s, and strlen(%ld\n", sliced_string_holder, strlen(sliced_string_holder));
-		printf("**ERROR: Unsupported command\n");
+		set_error("-ERR: Unsupported command\r\n");
 		free(sliced_string_holder);
 		return "";
 	}
 	
-	// #----- ################### ------------# //
 	free(sliced_string_holder);
 
 	index++;
@@ -321,29 +299,44 @@ char* parse_redis_protocol(char* command) {
 char ** parse_command_args(int n_args, char* command, int * index, int c_type) {
 
 	int length = 0;
-	char** arguments = malloc(n_args * sizeof(char*));
-
+	listpack arguments;
+	
+	if(c_type == 6) {
+		if((n_args-2) % 2 != 0) {
+			set_error("-ERR XADD command requires a stream key, id, and multiple of 2 K-V pairs\r\n");
+			return NULL;
+		}
+		arguments = malloc((n_args - (n_args-2)) * sizeof(char*));
+		key_value_data = malloc((n_args-1) * sizeof(char*));
+	} else arguments = malloc(n_args * sizeof(char*));
+	
+	int index_k_v = 0;
 	for(int i = 0; i < n_args; i++) {
 		while (command[*index] != '\r' && command[*index + 1] != '\n') {
 			if (!isdigit(command[*index])) {
-				printf("**ERROR: Expected digit for string length,%c\n", command[*index]);
+				set_error("-ERR Expected digit for string length\r\n");
 				return NULL;
 			}
 			length = length * 10 + (command[*index] - '0');
 			*index += 1;
 		}
+		
 		*index += 2;
+
 		char *arg = malloc(length+1 * sizeof(char));
 		arg[length] = '\0';
 		strncpy(arg, &command[*index], length);
+		if(i > 1 && c_type == 6) {
+			key_value_data[index_k_v] = arg;
+			index_k_v++;
+		} else arguments[i] = arg;
 
-		arguments[i] = arg;
-
-		*index += length + 3; // len + 2 for \r\n and 1 for $
+		*index += length + 3;
 		length = 0;
 	}	
 
-	// Added this 
+	if(c_type == 6) key_value_data[index_k_v] = NULL;
+
 	if(n_args == 4 && c_type == 5) {
 		for(int i = 0; i < 2; i++) 
 			arguments[2][i] = tolower(arguments[2][i]);
@@ -371,7 +364,6 @@ char ** parse_command_args(int n_args, char* command, int * index, int c_type) {
 
 // get argements, return response for the cleint
 char *parse_response(char **args, int c_type) {
-
 	char* response = NULL;
 	char special = 0;
 	switch (c_type)	{
@@ -417,11 +409,10 @@ char *parse_response(char **args, int c_type) {
 			if(look_node != NULL) {
 				response = malloc(9 * sizeof(char));
 				sprintf(response, "+string\r\n");
-			} else if(lookup_up_stream_one_node(args[0], NULL) == 1) {
+			} else if(lookup_up_stream(args[0]) != NULL) {
 				response = malloc(7 * sizeof(char));
 				sprintf(response, "+stream\r\n");
-			}
-			 else {
+			} else {
 				response = malloc(7 * sizeof(char));
 				sprintf(response, "+none\r\n");
 			}
@@ -431,212 +422,30 @@ char *parse_response(char **args, int c_type) {
 			break;
 		case 6:;
 			// $ redis-cli XADD stream_key 0-1 foo bar
-			insert_new_stream(args[0], args[1], args);
-
-			int len = strlen(args[1]);
-			response = malloc(len+strlen(args[1])+5);
-			sprintf(response, "$%d\r\n%s\r\n",len, args[1]);
+			char* id = insert_to_radix_tree(args, key_value_data, 0);
+			if(id == NULL) {
+				free(args[0]);
+				free(args[1]);
+				for(int i = 0; key_value_data[i] != NULL; i++)
+					free(key_value_data[i]);
+				return "";
+			}
+			
+			int len = strlen(id);
+			response = malloc(len+strlen(id)+5);
+			sprintf(response, "$%d\r\n%s\r\n",len, id);
 			return response;
+		case 7:
+			char* id_arr = insert_to_radix_tree(args, NULL, 1);
+			printf("%s", id_arr);
+			return "";
 		default:
 			break;
 	}
 	return "";
 }
 
-struct thread_argements {
-	int m_sec;
-	char *key;
-};
 
-void* delete_data(void *args) {
-	struct thread_argements *myargs = (struct thread_argements*) args;
-	struct timespec tc;
-	int res;
-
-	tc.tv_sec = myargs->m_sec / 1000;
-	tc.tv_nsec = (myargs->m_sec % 1000) * 1000000;
-	nanosleep(&tc, &tc);
-
-	remove_node(myargs->key);
-	free(args);
+void slice(const char* str, char* result, size_t start, size_t end) {
+    strncpy(result, str + start, end - start);
 }
-// HASH table data strucutre commands
-void init_Table() {
-    for(int i = 0; i < MAX_HASH_TABLE_LENGTH / 2; i+= 2) {
-        myHashTable.buckets[i] = NULL;
-		myHashTable.buckets[i+1] = NULL;
-	}
-}
-
-void insert_new(char* key, char* value, char exp, int m_sec) {
-
-	if(m_sec <= 0 && exp == 1) {
-		free(key);
-		free(value);
-		return;
-	};
-
-    linked_list *new_list = malloc(sizeof(linked_list));
-	if(new_list == NULL) {
-		printf("ERROR allocating memory!\n");
-		free(key);
-		free(value);
-		return;
-	}
-    new_list->key = key;
-    new_list->value = value;
-	
-	new_list->expires = exp == 1 ? 1 : 0;
-	new_list->milli_second = exp == 1 ? m_sec : 0;
-	
-    int index = hash(key);
-
-    if(myHashTable.buckets[index] == NULL) {
-        myHashTable.buckets[index] = new_list;
-        new_list->next = NULL;
-        new_list->before = NULL;
-    } else {
-        linked_list* old_node = myHashTable.buckets[index];
-        new_list->before = NULL;
-        old_node->before = new_list;
-        new_list->next = old_node;
-        myHashTable.buckets[index] = new_list;
-    }
-
-	if(exp == 1) {
-		struct thread_argements* pass_args = malloc(sizeof(struct thread_argements));
-		pass_args->key = key;
-		pass_args->m_sec = m_sec;
-		pthread_t thr;
-		int ret = pthread_create(&thr, NULL, delete_data, (void *) pass_args);
-		if(ret != 0) {
-			free(key);
-			free(value);
-			return;
-		}
-		pthread_detach(thr);
-	}
-}
-
-linked_list* lookup_table(char* key) {
-    int index = hash(key);
-
-    if(myHashTable.buckets[index] == NULL) return NULL;
-    
-    linked_list* node = myHashTable.buckets[index];
-    while(node != NULL) {
-        if(strcmp((node->key), key) == 0) {
-            return node;
-        } 
-        node = node->next;
-    }
-    return NULL;
-}
-
-char remove_node(char* key) {
-    linked_list* node = lookup_table(key);
-
-    if(node == NULL) 
-        return 1;
-
-    // Handle the case where node is the first in the bucket
-    if (node->before == NULL) {
-        // Update the bucket to point to the next node
-        int index = hash(key);
-        myHashTable.buckets[index] = node->next;
-    } else {
-        // Link the previous node to the next node
-        node->before->next = node->next;
-    }
-
-    // If the node is not the last, update the next node's before pointer
-    if (node->next != NULL) {
-        node->next->before = node->before;
-    }
-
-	free(node->key);
-	free(node->value);
-    free(node);
-    return 0;
-}
-
-unsigned long hash(const char *str) {
-    unsigned long hash = 5381;
-    int c;
-
-    while ((c = *str++)) {
-        hash = ((hash << 5) + hash) + c;  // hash * 33 + c
-    }
-
-    return hash % MAX_HASH_TABLE_LENGTH;
-}
-
-
-void init_stream_table() {
-    for(int i = 0; i < MAX_STREAM_KEYS; i++) 
-        stream_array[i] = NULL;
-}
-
-
-radix_node* create_new_stream_radix_node(char* id_key, linked_str_list* ch_pntr, char is_leaf, listpack k_v_data) {
-    radix_node* new_radix = malloc(sizeof(radix_node));
-
-    new_radix->children = ch_pntr;
-    new_radix->is_leaf = is_leaf;
-    new_radix->value = k_v_data;
-    new_radix->id_key = id_key;
-    printf("This is a new node: %s", id_key);
-    return new_radix;
-}
-
-int lookup_up_stream_one_node(char* stream_entry_key, char* id_key) {
-    for(int i = 0; i < MAX_STREAM_KEYS; i++) {
-		if(stream_array[i] == NULL) continue;
-		
-
-        if(strcmp(stream_array[i]->stream_key, stream_entry_key) == 0) {
-			return 1;
-            // linked_str_list* root_ent = stream_array[i]->stream_data;
-            // while(root_ent->data_pointer != NULL) {
-            //     radix_node* node = root_ent->data_pointer;
-            //     // int index = 0;
-            //     while(node != NULL) {
-            //         if(node->is_leaf == 1) {
-            //             printf("The node value is: %s with key: %s\n",node->value[1], node->id_key);
-            //             if(strcmp(node->id_key, id_key) == 0) {
-            //                 return 1;
-            //             }
-            //         }
-            //     }
-            //     root_ent = root_ent->next;
-            // }
-        }
-    }
-	printf("Couldn't findn\n");
-    return 0;
-}
-
-void insert_new_stream(char* stream_key, char* id_key, listpack k_v_data) {
-    // lookup for the stream key if it already exists, do their own logic
-
-    // new stream key
-    for(int i = 0; i < MAX_STREAM_KEYS; i++) {
-        if(stream_array[i] == NULL) {
-            // create the start data
-            radix_node* new_data = create_new_stream_radix_node(id_key, NULL, 1, k_v_data);
-            // link it with the root node
-            linked_str_list* root_node = malloc(sizeof(linked_str_list));
-            root_node->data_pointer = new_data;
-            root_node->next = NULL;
-            // link the root node with the stream entry;
-            stream_entry* new_stream_entry = malloc(sizeof(stream_entry));
-            new_stream_entry->stream_key = stream_key;
-            new_stream_entry->stream_data = root_node;
-            // root_node->data_pointer
-            stream_array[i] = new_stream_entry;
-			printf("Setting entry: %s", stream_array[i]->stream_key);
-			break;
-        }
-    }
-}
-
