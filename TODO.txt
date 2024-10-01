@@ -29,6 +29,8 @@ Process execution:
 
 4.# Add XRANGE command (DONE)
     4.1: Support the - command
+    4.2: Support the + command
+    
 
 
 3.# refactor the code, (NEED A LOT OF REFACTORING FOR PERFORMANCE AND READABILITY REASONS),
