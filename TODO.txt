@@ -27,8 +27,9 @@ Process execution:
     1.5: Add automatic sequence generator (DONE)
     1.6: ADD automatic ID generator (DONE)
 
-4.# Add XRANGE command
+4.# Add XRANGE command (DONE)
+    
 
 
-3.# refactor my code, so it supports proper error messages, better handling of commands, 
-    slicing up my functions into smaller ones.
+3.# refactor the code, (NEED A LOT OF REFACTORING FOR PERFORMANCE AND READABILITY REASONS),
+    so it supports proper error messages, better handling of commands, slicing up my functions into smaller ones.

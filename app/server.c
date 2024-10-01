@@ -36,7 +36,7 @@ listpack key_value_data;
 
 char* parse_redis_protocol(char* command);
 	char **parse_command_args(int n_args, char* command, int * index, int c_type);
-	char *parse_response(char **args, int command_type); 
+	char *parse_response(char **args, int c_type, int n_args); 
 
 
 
@@ -290,9 +290,8 @@ char* parse_redis_protocol(char* command) {
 		return "";
 	}
 
-	char *response = parse_response(args, command_type); 
+	char *response = parse_response(args, command_type, number_of_elements-1); 
 	return response;
-
 }
 
 // starts from the beginning of the arguments
@@ -363,7 +362,7 @@ char ** parse_command_args(int n_args, char* command, int * index, int c_type) {
 }
 
 // get argements, return response for the cleint
-char *parse_response(char **args, int c_type) {
+char *parse_response(char **args, int c_type, int n_args) {
 	char* response = NULL;
 	char special = 0;
 	switch (c_type)	{
@@ -378,7 +377,6 @@ char *parse_response(char **args, int c_type) {
 			free(args);
 			return response;
 			break;
-		
 		case 4:;
 			int mesec = atoi(args[3]);
 			free(args[3]);
@@ -422,7 +420,7 @@ char *parse_response(char **args, int c_type) {
 			break;
 		case 6:;
 			// $ redis-cli XADD stream_key 0-1 foo bar
-			char* id = insert_to_radix_tree(args, key_value_data, 0);
+			char* id = insert_to_radix_tree(args, key_value_data, 0, 0);
 			if(id == NULL) {
 				free(args[0]);
 				free(args[1]);
@@ -435,10 +433,14 @@ char *parse_response(char **args, int c_type) {
 			response = malloc(len+strlen(id)+5);
 			sprintf(response, "$%d\r\n%s\r\n",len, id);
 			return response;
-		case 7:
-			char* id_arr = insert_to_radix_tree(args, NULL, 1);
-			printf("%s", id_arr);
-			return "";
+		case 7:;
+			char* id_arr = insert_to_radix_tree(args, NULL, 1, n_args);
+			if(id_arr == NULL) {
+                free(args[0]);
+                return "";
+            }
+
+			return id_arr;
 		default:
 			break;
 	}
@@ -449,3 +451,4 @@ char *parse_response(char **args, int c_type) {
 void slice(const char* str, char* result, size_t start, size_t end) {
     strncpy(result, str + start, end - start);
 }
+q

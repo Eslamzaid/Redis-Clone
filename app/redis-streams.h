@@ -13,7 +13,12 @@ typedef struct {
     linked_str_list* linked_list;
 } stream_entry;
 
-char* insert_to_radix_tree(listpack args_meta, listpack k_v_d, char xadd_xrange);
+typedef struct __stack_group {
+    int num_elems;
+    unsigned long num_of_chars;
+} stack_group;
+
+char* insert_to_radix_tree(listpack args_meta, listpack k_v_d, char xadd_xrange, int n_args);
 void init_stream_table();
 void set_error(char* message);
 stream_entry* lookup_up_stream(char* stream_entry_key);
