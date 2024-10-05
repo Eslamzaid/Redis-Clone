@@ -271,6 +271,13 @@ char* parse_redis_protocol(char* command) {
 			return "";
 		}
 		command_type = 7;
+	} else if(strcmp(sliced_string_holder, "xread") == 0) {
+		if(number_of_elements < 3) {
+			set_error("-ERR: XREAD should have at least 3 arguments\r\n");
+            free(sliced_string_holder);
+            return "";
+		}
+		command_type = 8;
 	} else if(strcmp(sliced_string_holder, "ping") == 0) {
 		char* response = (char*) malloc(7 * sizeof(char));
 		sprintf(response, "+PONG\r\n");
@@ -322,13 +329,19 @@ char ** parse_command_args(int n_args, char* command, int * index, int c_type) {
 		
 		*index += 2;
 
+		if(i == 0 && c_type == 8) {
+			*index += length + 3;
+			length = 0;
+			continue;
+		} 
+		
 		char *arg = malloc(length+1 * sizeof(char));
 		arg[length] = '\0';
 		strncpy(arg, &command[*index], length);
 		if(i > 1 && c_type == 6) {
 			key_value_data[index_k_v] = arg;
 			index_k_v++;
-		} else arguments[i] = arg;
+		} else arguments[c_type == 8 ? i-1 : i] = arg;
 
 		*index += length + 3;
 		length = 0;
@@ -357,7 +370,7 @@ char ** parse_command_args(int n_args, char* command, int * index, int c_type) {
 			return NULL;
 		}
 	}
-    
+
     return arguments;
 }
 
@@ -423,7 +436,6 @@ char *parse_response(char **args, int c_type, int n_args) {
 			char* id = insert_to_radix_tree(args, key_value_data, 0, 0);
 			if(id == NULL) {
 				free(args[0]);
-				free(args[1]);
 				for(int i = 0; key_value_data[i] != NULL; i++)
 					free(key_value_data[i]);
 				return "";
@@ -439,8 +451,18 @@ char *parse_response(char **args, int c_type, int n_args) {
                 free(args[0]);
                 return "";
             }
-
 			return id_arr;
+
+		case 8:;
+			// check			
+			if((n_args-1) % 2 != 0) return "";	
+			
+			char* id_arrs = insert_to_radix_tree(args, NULL, 2, n_args);
+			if(id_arrs == NULL) { 
+				free(args[0]);
+                return "";
+            }
+			return id_arrs;
 		default:
 			break;
 	}
@@ -451,4 +473,3 @@ char *parse_response(char **args, int c_type, int n_args) {
 void slice(const char* str, char* result, size_t start, size_t end) {
     strncpy(result, str + start, end - start);
 }
-q

@@ -28,8 +28,11 @@ Process execution:
     1.6: ADD automatic ID generator (DONE)
 
 4.# Add XRANGE command (DONE)
-    4.1: Support the - command
-    4.2: Support the + command
+    4.1: Support the - command (Done)
+    4.2: Support the + command (Done)
+
+5.# Add the Xadd command (DONE)
+    5.1 Support multiple streams
     
 
 

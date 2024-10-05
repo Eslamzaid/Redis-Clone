@@ -53,32 +53,26 @@ stream_entry* lookup_up_stream(char* stream_entry_key) {
     return NULL;
 }
 
-
-// I am gonna have a function for setting the entries in the stack_group data structure
-    // this function if passed nothing, return NULL
-    // if passed only min, && max is + return every list starting from min to end
-    // if passed only max, && min is - return every list from the start to the max.
-
-// the data is stored in a reverse order MAX-MIN, now I want to retrieve data as MIN-MAX
-// Okay I will store the data in a reverse order, and will let the parser deal with it.
-// then I will have another function that will transform that data structure into hte redis-array
-linked_str_list* set_group(linked_str_list* starter_ent, listpack args, stack_group* elements_group) {
+linked_str_list* set_group(linked_str_list* starter_ent, listpack args, stack_group* elements_group, char equal_bigger) {
     linked_str_list* current_list = starter_ent;
     linked_str_list* current_new_list;
     char top_set = 0;
     unsigned long long curr_ms;
     int curr_seq;
 
+    unsigned long long min = 0, max = 0;
+    int min_seq = 0, max_seq = 0;
+    char broken_max = (args[2][0] == '+') ? 1 : 0;
 
-    unsigned long long min; // = strtoul(args[1], NULL, 10);
-    int min_seq;
-    unsigned long long max; // = strtoul(args[2], NULL, 10);
-    int max_seq;
+    if (args[1][0] != '-') {
+        char* byebye = parse_id(NULL, args[1], &min, &min_seq, 2);
+        if (byebye) free(byebye);
+    }
 
-    char* byebye = parse_id(NULL, args[1], &min, &min_seq, 0);
-    if(byebye != NULL) free(byebye);
-    byebye = parse_id(NULL, args[2], &max, &max_seq, 0);
-    if(byebye != NULL) free(byebye);
+    if (!broken_max) {
+        char* byebye = parse_id(NULL, args[2], &max, &max_seq, 2);
+        if (byebye) free(byebye);
+    }
 
     while(current_list != NULL) {
         char* junk = parse_id(current_list, current_list->key, &curr_ms, &curr_seq, 0);
@@ -86,11 +80,16 @@ linked_str_list* set_group(linked_str_list* starter_ent, listpack args, stack_gr
             return NULL;
         }
         free(junk);
-        if(curr_ms >= min && curr_ms <= max ) {
-            if(curr_seq >= min_seq && curr_seq <= max_seq) {
+
+        if(equal_bigger == 1 && curr_ms <= min) {
+            current_list = current_list->next;
+            continue;
+        }
+
+        if(curr_ms >= min && (curr_ms <= max || broken_max == 1) ) {
+            if(curr_seq >= min_seq && (curr_seq <= max_seq || broken_max == 1)) {
                 linked_str_list* new_list = create_new_list(current_list->key, current_list->value);
                 if(top_set == 0) {
-                    // elements_group->top = new_list;
                     elements_group->num_elems = 1;
                     elements_group->num_of_chars = 0;
                     current_new_list = new_list;
@@ -127,6 +126,7 @@ linked_str_list* set_group(linked_str_list* starter_ent, listpack args, stack_gr
         empty = 1;
         return NULL;
     }
+
     return current_new_list;
 }
 
@@ -145,22 +145,21 @@ linked_str_list* reverse_linked_list(linked_str_list* head) {
     return prev; // New head of the reversed list
 }
 
-char* get_elements(stream_entry* starter_ent, listpack args, int n_args) {
-    // ^ args[1] == is the min 
-    // ^ args[2] == is the max
+char* get_elements(stream_entry* starter_ent, listpack args, int n_args, char equal_bigger) {
     int args_len = n_args-1;
     stack_group* elems_group = malloc(sizeof(stack_group));
     if(args_len == 0) {
         return NULL;
     } 
-    
-    linked_str_list* the_list = set_group(starter_ent->linked_list, args, elems_group);
+    linked_str_list* the_list = set_group(starter_ent->linked_list, args, elems_group, equal_bigger);
     if(the_list == NULL) {
         if(empty == 1) {
-            printf("EMPTY\n");
             empty = 0;
-            return NULL;
-        } return NULL;
+            printf("EMPTY\n");
+        } 
+        if(equal_bigger != 1) free(args[2]);
+        free(elems_group);
+        return NULL;
     }
     
     linked_str_list* output = reverse_linked_list(the_list);
@@ -175,6 +174,8 @@ char* get_elements(stream_entry* starter_ent, listpack args, int n_args) {
     char* response = malloc((elems_group->num_of_chars + 1) * sizeof(char));
     if (!response) {
         set_error("Failed to allocate memory\n");
+        free(the_list);
+        free(elems_group);
         return NULL;
     }
 
@@ -222,7 +223,7 @@ char* get_elements(stream_entry* starter_ent, listpack args, int n_args) {
             }
             sprintf(value_string, "$%d\r\n%s\r\n", value_len, current_list->value[j]);
             strcat(response, value_string);
-            // free(value_string);
+            free(value_string);
             j++;
         }
 
@@ -231,12 +232,98 @@ char* get_elements(stream_entry* starter_ent, listpack args, int n_args) {
     }
     
     free(args[2]);
+    free(elems_group);
     while (output != NULL) {
         linked_str_list* next = output->next;
         free(output);
         output = next;
     }
+    return response;
+}
 
+char* read_streams(listpack args, int n_args) {
+    
+    //& args[0] == stream_key
+    //& args[1] == stream_key || id
+    //& and so on    
+
+    int total_length = 0;
+    listpack total_stream_keys = malloc(n_args/2 * sizeof(char*));
+    int stream_min_key = 1;
+    
+    int index = 0;
+    int n_arguments = n_args-1;
+
+    while(n_arguments > 0) {
+        char* the_plus = malloc(2 * sizeof(char));
+        the_plus[0] = '+';
+        the_plus[1] = '\0';
+        listpack new_args = malloc(3 * sizeof(char*));
+        stream_entry* stream_entry = lookup_up_stream(args[stream_min_key-1]);
+        if(stream_entry == NULL) {
+            free(new_args);
+            free(the_plus);
+            n_arguments -= 2;
+            stream_min_key += 2;
+            continue;
+        }
+        
+        new_args[1] = args[stream_min_key];
+        new_args[2] = the_plus;
+
+        char* stream_keys = get_elements(stream_entry, new_args, n_arguments, 0);
+        if(stream_keys == NULL) {
+            free(new_args);
+            free(the_plus);
+            total_stream_keys[index] = NULL;
+            index++;
+            n_arguments -= 2;
+            stream_min_key += 2;
+            continue;
+        }
+        
+        total_length += strlen(stream_keys) + 
+            strlen(args[stream_min_key-1]) + 5 + (int)((ceil(log10(strlen(args[stream_min_key-1]))))*sizeof(char))
+            + 4;
+        total_stream_keys[index] = strdup(stream_keys);
+        free(stream_keys);
+        free(new_args);
+
+        n_arguments -= 2;
+        stream_min_key += 2;
+        index++;
+    }   
+
+    if(index == 0) {
+        free(total_stream_keys);
+        return NULL;
+    }
+
+    int len = 3; // Start with "*\r\n"
+    len += (n_args/2 <= 9 ? 1:(int)((ceil(log10(n_args/2)))));
+    total_length += len;
+
+    char* response = malloc(total_length+1 * sizeof(char));
+    sprintf(response, "*%d\r\n", n_args/2);
+    strcat(response, "*2\r\n");
+
+    int key_index = 0;
+    for(int i = 0; i < index; i++) {
+        if(total_stream_keys[i] == NULL) {
+            key_index+=2;
+            continue;
+        }
+        char* entry = malloc(5 + strlen(args[key_index]) + (int)((ceil(log10(strlen(args[key_index]))))*sizeof(char)));
+        sprintf(entry, "$%ld\r\n%s\r\n", strlen(args[key_index]), args[key_index]);
+        strcat(response, entry);
+        free(entry);
+        strcat(response, total_stream_keys[i]);
+        free(total_stream_keys[i]);
+        key_index += 2;
+    }
+
+    // ! freeing the "args" data
+    free(total_stream_keys);
     return response;
 }
 
@@ -308,14 +395,13 @@ char* insert_new_to_stream(stream_entry* current_stream_entry, char* id, listpac
     current_stream_entry->linked_list = new_list;
     free(id);
     
-
     return junk;
 }
 
 
 char* insert_to_radix_tree(listpack args_meta, listpack k_v_d, char xadd_xrange, int n_args) {
 	stream_entry* stream_entry = lookup_up_stream(args_meta[0]);
-    char* new_id;
+    char* new_id = NULL;
     if(xadd_xrange == 0) {
         if(stream_entry == NULL) { 
             new_id = parse_id(NULL, args_meta[1], NULL, NULL, 1);
@@ -325,16 +411,21 @@ char* insert_to_radix_tree(listpack args_meta, listpack k_v_d, char xadd_xrange,
             new_id = parse_id(stream_entry->linked_list, args_meta[1], NULL, NULL, 1);
             if(new_id == NULL) return NULL;
             new_id = insert_new_to_stream(stream_entry, new_id, k_v_d);
-            if(new_id == NULL) return NULL;
         }
-    } else {
-        if(stream_entry == NULL) return NULL;
-        else new_id = get_elements(stream_entry, args_meta, n_args);
-    }
-
+    } 
+     
+    if(stream_entry != NULL && xadd_xrange != 0) {
+        if(xadd_xrange == 1) {
+            new_id = get_elements(stream_entry, args_meta, n_args, 0);
+        } else {	
+            new_id = read_streams(args_meta, n_args);
+        }
+    } 
     free(args_meta[1]);
     return new_id;
 }
+
+
 
 char* parse_id(linked_str_list* linked_list, char* id, unsigned long long *ms, int *seq_num, char get_upd) {
     int len = strlen(id);
@@ -366,7 +457,7 @@ char* parse_id(linked_str_list* linked_list, char* id, unsigned long long *ms, i
                         if(parse_id(linked_list, list->key, &temp_ms, &temp_seq, 0) == NULL) return NULL;
 
                         if(temp_ms == ms_number) {
-                            seq_value = get_upd == 0 ? temp_seq : temp_seq+1;
+                            seq_value = (get_upd == 0 || get_upd == 2) ? temp_seq : temp_seq+1;
                             if(seq_num != NULL) seq_value = temp_seq;
                         } else {
                             seq_value = ms_number == 0 ? 1 : 0;
@@ -385,10 +476,11 @@ char* parse_id(linked_str_list* linked_list, char* id, unsigned long long *ms, i
                 }
 
 
-                if(ms_number == 0 && seq_value == 0) {
+                if(ms_number == 0 && seq_value == 0 && get_upd != 2) {
                     set_error("-ERR The ID specified in XADD must be greater than 0-0\r\n");
                     return NULL;
                 }
+
                 int seq_len = seq_value <= 9 ? 1 : (int)((ceil(log10(seq_value)))*sizeof(char));
                 int ms_len = ms_number <= 9 ? 1 : (int)((ceil(log10(ms_number)))*sizeof(char));
 
